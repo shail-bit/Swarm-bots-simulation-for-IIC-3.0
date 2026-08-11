@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Self-Assembling Swarm — Simulation</title>
+<style>
+  :root{
+    --navy:#0B1230; --navy2:#141B45; --card:#101838; --border:#2A3468;
+    --cyan:#00E5FF; --cyan-dim:#0090A8; --text:#F4F6FB; --muted:#9AA2C7;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--navy);font-family:Calibri,Arial,sans-serif;color:var(--text);}
+  .wrap{display:flex;flex-direction:column;height:100%;padding:18px;gap:14px;}
+  header{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+  header h1{font-family:Cambria,Georgia,serif;font-size:22px;margin:0;font-weight:700;letter-spacing:.3px;}
+  header .sub{color:var(--muted);font-size:12.5px;}
+  .stage{position:relative;flex:1;min-height:320px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:radial-gradient(ellipse at 30% 20%, #131a42 0%, #0B1230 70%);}
+  canvas{display:block;width:100%;height:100%;}
+  .hud{position:absolute;top:12px;left:14px;font-size:11.5px;color:var(--muted);line-height:1.7;background:rgba(11,18,48,.55);padding:8px 12px;border-radius:8px;border:1px solid var(--border);backdrop-filter:blur(2px);}
+  .hud b{color:var(--cyan);}
+  .mode-badge{position:absolute;top:12px;right:14px;font-size:11px;letter-spacing:1.5px;font-weight:700;color:var(--navy);background:var(--cyan);padding:6px 12px;border-radius:20px;}
+  .panel{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}
+  .group{display:flex;flex-direction:column;gap:6px;min-width:130px;}
+  .group label{font-size:11px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
+  .group .val{color:var(--cyan);font-weight:700;}
+  input[type=range]{accent-color:var(--cyan);width:150px;}
+  .modes{display:flex;gap:8px;}
+  button{cursor:pointer;font-family:Calibri,Arial,sans-serif;font-size:13px;font-weight:600;border-radius:8px;padding:9px 14px;border:1px solid var(--border);background:var(--navy2);color:var(--text);transition:.15s;}
+  button:hover{border-color:var(--cyan);}
+  button.active{background:var(--cyan);color:var(--navy);border-color:var(--cyan);}
+  .spacer{flex:1;}
+  .reset{background:transparent;color:var(--muted);}
+  footer{font-size:11px;color:var(--muted);text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Self-Assembling Structures</h1>
+      <div class="sub">Separation · Alignment · Cohesion — no central controller</div>
+    </div>
+    <div class="sub">Each agent senses only nearby neighbors within its local radius.</div>
+  </header>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="hud">
+      Agents: <b id="hudCount">0</b><br>
+      Assembled: <b id="hudLocked">0</b><br>
+      FPS: <b id="hudFps">--</b>
+    </div>
+    <div class="mode-badge" id="hudMode">FREE FLOCK</div>
+  </div>
+
+  <div class="panel">
+    <div class="modes">
+      <button id="modeFree" class="active">Free Flock</button>
+      <button id="modeTower">Build Tower</button>
+      <button id="modeBridge">Build Bridge</button>
+    </div>
+
+    <div class="group">
+      <label>Agents <span class="val" id="lblCount">140</span></label>
+      <input id="rngCount" type="range" min="30" max="300" step="10" value="140">
+    </div>
+    <div class="group">
+      <label>Separation <span class="val" id="lblSep">1.4</span></label>
+      <input id="rngSep" type="range" min="0" max="3" step="0.1" value="1.4">
+    </div>
+    <div class="group">
+      <label>Alignment <span class="val" id="lblAli">1.0</span></label>
+      <input id="rngAli" type="range" min="0" max="3" step="0.1" value="1.0">
+    </div>
+    <div class="group">
+      <label>Cohesion <span class="val" id="lblCoh">1.0</span></label>
+      <input id="rngCoh" type="range" min="0" max="3" step="0.1" value="1.0">
+    </div>
+
+    <div class="spacer"></div>
+    <button class="reset" id="btnReset">Reset</button>
+  </div>
+
+  <footer>swarm-sim.html · runs fully in-browser, no server or network calls</footer>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+function resize(){
+  const r = canvas.parentElement.getBoundingClientRect();
+  canvas.width = r.width * devicePixelRatio;
+  canvas.height = r.height * devicePixelRatio;
+  canvas.style.width = r.width+'px';
+  canvas.style.height = r.height+'px';
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+}
+window.addEventListener('resize', resize);
+
+let W, H;
+function dims(){ const r = canvas.parentElement.getBoundingClientRect(); W=r.width; H=r.height; }
+
+// ---------------- state ----------------
+let MODE = 'free'; // free | tower | bridge
+let boids = [];
+let targets = [];
+const PARAMS = { sep: 1.4, ali: 1.0, coh: 1.0, count: 140 };
+const PERCEPTION = 55;
+const SEP_RADIUS = 22;
+const MAX_SPEED = 2.6;
+const MAX_FORCE = 0.09;
+const LOCK_DIST = 5;
+
+function rand(a,b){ return a + Math.random()*(b-a); }
+
+class Boid{
+  constructor(x,y){
+    this.x=x; this.y=y;
+    const a = Math.random()*Math.PI*2;
+    this.vx = Math.cos(a)*1.5; this.vy = Math.sin(a)*1.5;
+    this.target=null; this.carrying=false;
+  }
+}
+
+function spawnBoids(n){
+  boids = [];
+  dims();
+  for(let i=0;i<n;i++){
+    boids.push(new Boid(rand(W*0.1,W*0.9), rand(H*0.15,H*0.85)));
+  }
+}
+
+// ---- target structures ----
+function generateTower(){
+  dims();
+  const pts = [];
+  const cx = W*0.5, baseY = H*0.86, levels = 14, topW = 18, baseW = 90;
+  for(let lvl=0; lvl<levels; lvl++){
+    const t = lvl/(levels-1);
+    const w = baseW + (topW-baseW)*t;
+    const y = baseY - lvl*( (H*0.62) / levels );
+    const count = Math.max(2, Math.round(w/9));
+    for(let k=0;k<count;k++){
+      const x = cx - w/2 + (w*k/(count-1||1));
+      pts.push({x, y});
+    }
+  }
+  return pts;
+}
+
+function generateBridge(){
+  dims();
+  const pts = [];
+  const y0 = H*0.78, deckY = H*0.5, leftX = W*0.15, rightX = W*0.85;
+  // two piers
+  for(const px of [leftX, rightX]){
+    for(let y=deckY; y<=y0; y+=9){
+      pts.push({x:px, y});
+      pts.push({x:px-14, y});
+      pts.push({x:px+14, y});
+    }
+  }
+  // arched deck/span
+  const span = rightX-leftX;
+  const segs = 46;
+  for(let i=0;i<=segs;i++){
+    const t = i/segs;
+    const x = leftX + span*t;
+    const arch = Math.sin(Math.PI*t) * (H*0.10);
+    pts.push({x, y: deckY - arch});
+    if(i%3===0) pts.push({x, y: deckY - arch + 8});
+  }
+  return pts;
+}
+
+let buildQueue = [];
+let filledCount = 0;
+
+function requestTarget(b){
+  // bot heads back out to fetch the next unclaimed build site — like a worker returning for more material
+  if(buildQueue.length>0){
+    b.target = buildQueue.shift();
+    b.carrying = true;
+  } else {
+    b.target = null;
+    b.carrying = false;
+  }
+}
+
+function assignTargets(){
+  targets.forEach(t=>t.filled=false);
+  filledCount = 0;
+  buildQueue = [...targets];
+  // shuffle so bots don't all rush the same corner of the structure
+  for(let i=buildQueue.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [buildQueue[i],buildQueue[j]] = [buildQueue[j],buildQueue[i]];
+  }
+  boids.forEach(b=>{ b.target=null; b.carrying=false; requestTarget(b); });
+}
+
+function setMode(m){
+  MODE = m;
+  document.querySelectorAll('.modes button').forEach(btn=>btn.classList.remove('active'));
+  document.getElementById(m==='free'?'modeFree':m==='tower'?'modeTower':'modeBridge').classList.add('active');
+  document.getElementById('hudMode').textContent = m==='free' ? 'FREE FLOCK' : m==='tower' ? 'BUILDING TOWER' : 'BUILDING BRIDGE';
+  if(m==='free'){
+    targets=[]; buildQueue=[]; filledCount=0;
+    boids.forEach(b=>{b.target=null; b.carrying=false;});
+  } else {
+    targets = m==='tower' ? generateTower() : generateBridge();
+    assignTargets();
+  }
+}
+
+// ---------------- physics ----------------
+function limit(vx,vy,max){
+  const m = Math.hypot(vx,vy);
+  if(m>max){ return [vx/m*max, vy/m*max]; }
+  return [vx,vy];
+}
+
+function step(){
+  const n = boids.length;
+  for(let i=0;i<n;i++){
+    const b = boids[i];
+
+    let sepX=0, sepY=0, aliX=0, aliY=0, cohX=0, cohY=0, count=0;
+    for(let j=0;j<n;j++){
+      if(i===j) continue;
+      const o = boids[j];
+      const dx = b.x-o.x, dy = b.y-o.y;
+      const d2 = dx*dx+dy*dy;
+      if(d2 < PERCEPTION*PERCEPTION && d2>0){
+        count++;
+        aliX += o.vx; aliY += o.vy;
+        cohX += o.x; cohY += o.y;
+        if(d2 < SEP_RADIUS*SEP_RADIUS){
+          const d = Math.sqrt(d2)||0.01;
+          sepX += dx/d; sepY += dy/d;
+        }
+      }
+    }
+
+    let ax=0, ay=0;
+    if(count>0){
+      aliX/=count; aliY/=count;
+      let [avx,avy] = limit(aliX,aliY,MAX_SPEED);
+      ax += (avx - b.vx) * 0.05 * PARAMS.ali;
+      ay += (avy - b.vy) * 0.05 * PARAMS.ali;
+
+      cohX/=count; cohY/=count;
+      let dx = cohX-b.x, dy = cohY-b.y;
+      [dx,dy] = limit(dx,dy,MAX_SPEED);
+      ax += (dx - b.vx) * 0.05 * PARAMS.coh;
+      ay += (dy - b.vy) * 0.05 * PARAMS.coh;
+    }
+    let [sx,sy] = limit(sepX,sepY,MAX_SPEED);
+    ax += (sx - b.vx) * 0.08 * PARAMS.sep;
+    ay += (sy - b.vy) * 0.08 * PARAMS.sep;
+
+    // build-mode seek force toward assigned local target
+    if(MODE!=='free' && b.target){
+      const dx = b.target.x - b.x, dy = b.target.y - b.y;
+      const dist = Math.hypot(dx,dy);
+      if(dist < LOCK_DIST){
+        // deliver the block, then head back out for the next open site
+        b.target.filled = true;
+        filledCount++;
+        requestTarget(b);
+      } else {
+        let [tx,ty] = limit(dx,dy,MAX_SPEED);
+        ax += (tx-b.vx) * 0.12;
+        ay += (ty-b.vy) * 0.12;
+      }
+    }
+
+    [ax,ay] = limit(ax,ay,MAX_FORCE*3);
+    b.vx += ax; b.vy += ay;
+    [b.vx,b.vy] = limit(b.vx,b.vy,MAX_SPEED);
+    b.x += b.vx; b.y += b.vy;
+
+    // soft bounds
+    const pad=10;
+    if(b.x<pad){ b.x=pad; b.vx*=-0.6; }
+    if(b.x>W-pad){ b.x=W-pad; b.vx*=-0.6; }
+    if(b.y<pad){ b.y=pad; b.vy*=-0.6; }
+    if(b.y>H-pad){ b.y=H-pad; b.vy*=-0.6; }
+  }
+}
+
+function drawBot(b){
+  const angle = Math.atan2(b.vy, b.vx);
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(angle);
+
+  // carried block — trails behind the chassis while ferrying material to the build site
+  if(b.carrying){
+    ctx.fillStyle = 'rgba(0,229,255,0.85)';
+    ctx.strokeStyle = 'rgba(11,18,48,0.8)';
+    ctx.lineWidth = 0.5;
+    ctx.fillRect(-9.5,-2.2,4.4,4.4);
+    ctx.strokeRect(-9.5,-2.2,4.4,4.4);
+  }
+
+  // chassis — small five-point body, nose forward (+x)
+  ctx.beginPath();
+  ctx.moveTo(6.5, 0);
+  ctx.lineTo(1.5, 4.2);
+  ctx.lineTo(-4.5, 3);
+  ctx.lineTo(-4.5, -3);
+  ctx.lineTo(1.5, -4.2);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(212,217,238,0.95)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,229,255,0.55)';
+  ctx.lineWidth = 0.7;
+  ctx.stroke();
+
+  // twin thrusters at the rear
+  ctx.fillStyle = 'rgba(154,162,199,0.9)';
+  ctx.fillRect(-5.5, -2.6, 1.6, 1.6);
+  ctx.fillRect(-5.5, 1.0, 1.6, 1.6);
+
+  // nose sensor light
+  ctx.beginPath();
+  ctx.arc(4.2, 0, 1.15, 0, Math.PI*2);
+  ctx.fillStyle = b.carrying ? '#FFC857' : '#00E5FF';
+  ctx.shadowColor = b.carrying ? '#FFC857' : '#00E5FF';
+  ctx.shadowBlur = 5;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.restore();
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+
+  // faint ghosts for build sites not yet filled
+  if(MODE!=='free'){
+    ctx.fillStyle='rgba(0,229,255,0.10)';
+    targets.forEach(t=>{
+      if(!t.filled){ ctx.beginPath(); ctx.arc(t.x,t.y,3,0,Math.PI*2); ctx.fill(); }
+    });
+    // completed structure — bricks placed by the bots
+    targets.forEach(t=>{
+      if(t.filled){
+        ctx.fillStyle = '#00E5FF';
+        ctx.shadowColor='#00E5FF'; ctx.shadowBlur=5;
+        ctx.fillRect(t.x-2.5,t.y-2.5,5,5);
+        ctx.shadowBlur=0;
+      }
+    });
+  }
+
+  boids.forEach(b=> drawBot(b));
+
+  document.getElementById('hudCount').textContent = boids.length;
+  document.getElementById('hudLocked').textContent = MODE==='free' ? '—' : (filledCount+' / '+targets.length);
+}
+
+// ---------------- loop ----------------
+let last = performance.now(), frames=0, fpsT=0;
+function loop(now){
+  const dt = now-last; last=now;
+  frames++; fpsT+=dt;
+  if(fpsT>500){ document.getElementById('hudFps').textContent = Math.round(frames*1000/fpsT); frames=0; fpsT=0; }
+  step();
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ---------------- controls ----------------
+document.getElementById('modeFree').onclick = ()=>setMode('free');
+document.getElementById('modeTower').onclick = ()=>setMode('tower');
+document.getElementById('modeBridge').onclick = ()=>setMode('bridge');
+document.getElementById('btnReset').onclick = ()=>{ spawnBoids(PARAMS.count); setMode(MODE==='free'?'free':MODE); if(MODE!=='free'){targets = MODE==='tower'?generateTower():generateBridge(); assignTargets();} };
+
+document.getElementById('rngCount').oninput = e=>{
+  PARAMS.count = +e.target.value;
+  document.getElementById('lblCount').textContent = PARAMS.count;
+  spawnBoids(PARAMS.count);
+  if(MODE!=='free'){ assignTargets(); }
+};
+document.getElementById('rngSep').oninput = e=>{ PARAMS.sep=+e.target.value; document.getElementById('lblSep').textContent=PARAMS.sep.toFixed(1); };
+document.getElementById('rngAli').oninput = e=>{ PARAMS.ali=+e.target.value; document.getElementById('lblAli').textContent=PARAMS.ali.toFixed(1); };
+document.getElementById('rngCoh').oninput = e=>{ PARAMS.coh=+e.target.value; document.getElementById('lblCoh').textContent=PARAMS.coh.toFixed(1); };
+
+// ---------------- init ----------------
+resize();
+dims();
+spawnBoids(PARAMS.count);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
